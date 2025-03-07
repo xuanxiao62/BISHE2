@@ -1,0 +1,13 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.adapterTargetName": "esp32c3",
+  "idf.portWin": "COM3",
+  "idf.openOcdConfigs": [
+    "board/esp32c3-ftdi.cfg"
+  ],
+  "idf.flashType": "UART",
+  "files.associations": {
+    "mqtt_client.h": "c",
+    "stdio.h": "c"
+  }
+}

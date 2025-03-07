@@ -1,0 +1,1 @@
+C:\Users\马文\AppData\Local\Temp\confgen_tmpk14sz1db:100: warning: '1' is not a valid value for the bool symbol SOC_I2S_NUM (defined at D:/esp/v5.0.1/esp-idf\./components/soc/esp32c3/include/soc/Kconfig.soc_caps.in:354). Assignment ignored.
