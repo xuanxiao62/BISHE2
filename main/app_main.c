@@ -13,6 +13,7 @@
 #include <string.h>
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_mac.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -29,18 +30,102 @@
 
 #include "esp_log.h"
 #include "mqtt_client.h"
+#include "driver/uart.h"
+#include "senser.h"
+#include "config.h"
 
-const char *product_key       = "a15D0zFeGtP";
-const char *device_name       = "AHT10";
-const char *device_secret     = "cb9c345a45bfbf1dec62874479e62626";
+// 新增代码：定义传感器和设备引脚
+#define SENSOR_PIN  6 // 假设传感器连接到 GPIO 6
+#define DEVICE_PIN  12  // 控制另一个设备的 GPIO 引脚
+// UART配置（与K230通信）
+#define UART_NUM       UART_NUM_1
+#define UART_RX_PIN   8
+#define UART_TX_PIN   9
+#define BUF_SIZE       1024
 
 
-static const char *TAG = "MQTT_EXAMPLE";
+// 报警开关属性定义（Alink协议）
+#define ALARM_TOPIC    "/sys/a15D0zFeGtP/AHT10/thing/event/property/post"
+#define ALARM_MSG      "{\"params\":{\"AlarmSwitch\":1}}"
+#define RESET_MSG      "{\"params\":{\"AlarmSwitch\":0}}"
 
+// 新增代码：GPIO 初始化函数
+static void gpio_init(void)
+{
+    gpio_config_t io_conf;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
 
+    // 配置传感器引脚为输入模式
+    io_conf.mode = GPIO_MODE_INPUT;
+    io_conf.pin_bit_mask = (1ULL << SENSOR_PIN);
+    io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&io_conf);
 
-#define ALINK_BODY_FORMAT "{\"id\":\"1721639473270\",\"params\":{\"CurrentHumidity\":%d,\"KeepFreshTemperature\":%d},\"version\":\"1.0\",\"method\":\"thing.event.property.post\"}"
+    // 配置设备引脚为输出模式
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = (1ULL << DEVICE_PIN);
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&io_conf);
+}
 
+// 新增代码：GPIO 任务函数
+void gpio_task(void *pvParameters)
+{
+    gpio_init();
+
+    while(1) {
+        if (gpio_get_level(SENSOR_PIN)) {
+            // If GPIO_NUM_INPUT is high, set GPIO_NUM_OUTPUT to low
+            gpio_set_level(DEVICE_PIN, 0);
+        }
+        else {
+            // If GPIO_NUM_INPUT is low, set GPIO_NUM_OUTPUT to high
+            gpio_set_level(DEVICE_PIN, 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10)); // Delay to avoid rapid toggling
+    }
+}
+
+static const char *TAG = "app_main.c";
+
+esp_mqtt_client_handle_t client;
+// 修改UART初始化函数
+static void uart_init() {
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB  // 显式指定时钟源
+    };
+    uart_param_config(UART_NUM, &uart_config);
+    uart_set_pin(UART_NUM, UART_TX_PIN, UART_RX_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_NUM, BUF_SIZE * 2, BUF_SIZE * 2, 0, NULL, 0); // 修复缓冲区大小
+}
+// UART接收任务（监听K230的报警信号）
+void uart_receive_task(void *pvParameters) {
+    char rx_buffer[BUF_SIZE];
+    while (1) {
+        int len = uart_read_bytes(UART_NUM, (uint8_t*)rx_buffer, BUF_SIZE, pdMS_TO_TICKS(100));
+        if (len > 0) {
+            rx_buffer[len] = '\0';
+            if (strstr(rx_buffer, "mouse_ALARM")) {
+                // 上报报警开启状态
+                esp_mqtt_client_publish(client, ALARM_TOPIC, ALARM_MSG, 0, 1, 0);
+                ESP_LOGI(TAG, "AlarmSwitch=1 sent");
+
+                // 模拟报警结束后重置（根据实际需求调整）
+                vTaskDelay(pdMS_TO_TICKS(50000));
+                esp_mqtt_client_publish(client, ALARM_TOPIC, RESET_MSG, 0, 1, 0);
+                ESP_LOGI(TAG, "AlarmSwitch=0 sent");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
 static void log_error_if_nonzero(const char *message, int error_code)
 {
     if (error_code != 0) {
@@ -67,17 +152,14 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos1", "data_3", 0, 1, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+        // msg_id = esp_mqtt_client_publish(client, g_mqtt_topic_pub, "Device online.", 0, 1, 0);
+        // ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos0", 0);
+        msg_id = esp_mqtt_client_subscribe(client, MQTT_TOPIC_SUB, 0);
         ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
-        msg_id = esp_mqtt_client_subscribe(client, "/topic/qos1", 1);
-        ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-
-        msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
-        ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
+        // msg_id = esp_mqtt_client_unsubscribe(client, "/topic/qos1");
+        // ESP_LOGI(TAG, "sent unsubscribe successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -85,8 +167,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+        // msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
+        // ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_UNSUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -96,8 +178,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-        printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
-        printf("DATA=%.*s\r\n", event->data_len, event->data);
+        // printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+        // printf("DATA=%.*s\r\n", event->data_len, event->data);
+        printf("Recieve message: %.*s\r\n", event->data_len, event->data);
         break;
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -106,7 +189,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
             log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
             ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
-
         }
         break;
     default:
@@ -117,45 +199,23 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 static void mqtt_app_start(void)
 {
+    // char last_will[25] = {0};
+    // sprintf(last_will, "Device %s is offline", g_chipid);
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = CONFIG_BROKER_URL,
         .credentials.username = "AHT10&a15D0zFeGtP",
-        .credentials.authentication.password = "59c62d9ead310837cf63b7f64cf1371adb4925044bfd22ce6947280108b927f5",
-        .session.keepalive = 120,
+        .credentials.authentication.password = "1c842e35aeb48a1d1e8f48be6f86fc6c72d8dd1f8456a7a2b55e905fe48f6c64",
+        .credentials.client_id = "a15D0zFeGtP.AHT10|securemode=2,signmethod=hmacsha256,timestamp=1746279845557|",
         .session.protocol_ver = MQTT_PROTOCOL_V_3_1_1,
+        .session.keepalive = 120,
         .session.disable_clean_session = false,
-        .session.last_will.topic = "/last_will",
-        .session.last_will.msg = "Bye",
-        .session.last_will.qos = 1,
-        .session.last_will.retain = false,
-
+        // .session.last_will.topic = "/test/offline",
+        // .session.last_will.msg = last_will,
+        // .session.last_will.qos = 1,
+        // .session.last_will.retain = false,
     };
-#if CONFIG_BROKER_URL_FROM_STDIN
-    char line[128];
 
-    if (strcmp(mqtt_cfg.broker.address.uri, "FROM_STDIN") == 0) {
-        int count = 0;
-        printf("Please enter url of mqtt broker\n");
-        while (count < 128) {
-            int c = fgetc(stdin);
-            if (c == '\n') {
-                line[count] = '\0';
-                break;
-            } else if (c > 0 && c < 127) {
-                line[count] = c;
-                ++count;
-            }
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-        }
-        mqtt_cfg.broker.address.uri = line;
-        printf("Broker url: %s\n", line);
-    } else {
-        ESP_LOGE(TAG, "Configuration mismatch: wrong broker url");
-        abort();
-    }
-#endif /* CONFIG_BROKER_URL_FROM_STDIN */
-
-    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    client = esp_mqtt_client_init(&mqtt_cfg);
     /* The last argument may be used to pass data to the event handler, in this example mqtt_event_handler */
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(client);
@@ -163,9 +223,13 @@ static void mqtt_app_start(void)
 
 void app_main(void)
 {
+    // uint8_t mac[6];
+    // esp_efuse_mac_get_default(mac);
+    // sprintf(g_chipid, "%02x%02x%02x", mac[3], mac[4], mac[5]);
+    // ESP_LOGI(TAG, "ESP32-C3 Chipid: %s", g_chipid);
+
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %" PRIu32 " bytes", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
 
     esp_log_level_set("*", ESP_LOG_INFO);
     esp_log_level_set("mqtt_client", ESP_LOG_VERBOSE);
@@ -185,5 +249,19 @@ void app_main(void)
      */
     ESP_ERROR_CHECK(example_connect());
 
+    // 初始化UART和MQTT
+    uart_init();
     mqtt_app_start();
+
+ 
+    ESP_ERROR_CHECK(i2c_master_init());
+    xTaskCreate(senser_task_run, "senser_task", 4096, NULL, 10, NULL);
+    // 创建UART接收任务
+    xTaskCreate(uart_receive_task, "uart_task", 4096, NULL, 5, NULL);
+    // 新增代码：创建 GPIO 任务
+    xTaskCreate(gpio_task, "gpio_task", 4096, NULL, 5, NULL);
+
+    while (1) {
+        SLEEP_MS(100000);
+    }
 }

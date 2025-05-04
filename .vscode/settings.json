@@ -1,13 +1,23 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
   "idf.adapterTargetName": "esp32c3",
-  "idf.portWin": "COM3",
   "idf.openOcdConfigs": [
     "board/esp32c3-ftdi.cfg"
   ],
+  "idf.portWin": "COM7",
   "idf.flashType": "UART",
   "files.associations": {
     "mqtt_client.h": "c",
-    "stdio.h": "c"
-  }
+    "nvs_flash.h": "c",
+    "esp_efuse.h": "c",
+    "common.h": "c",
+    "senser.h": "c",
+    "esp_system.h": "c",
+    "esp_netif.h": "c",
+    "esp_event.h": "c",
+    "protocol_examples_common.h": "c"
+  },
+  "idf.espIdfPathWin": "d:\\esp\\v5.0.1\\esp-idf",
+  "idf.toolsPathWin": "d:\\esptools",
+  "idf.pythonInstallPath": "d:\\esptools\\tools\\idf-python\\3.11.2\\python.exe"
 }
